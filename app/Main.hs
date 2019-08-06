@@ -9,51 +9,54 @@ import qualified Data.Text.Lazy as LT
 import qualified Data.Text.Lazy.IO as LT
 import Data.GraphViz
 import Data.GraphViz.Printing (renderDot)
+import qualified Data.GraphViz.Attributes.Complete as G
+import qualified Data.GraphViz.Types.Canonical as G
 import Control.Arrow
 
-data DFA s a = DFA
-  { hop   :: s -> a -> s
-  , initial :: s
-  , final   :: [s]
-  }
+data DFA s a = DFA (s -> a -> s) s [s]
+
+hop :: DFA s a -> (s -> a -> s)
+hop (DFA f _ _) = f
 
 hops :: DFA s a -> s -> [a] -> s
 hops dfa = foldl $ hop dfa
 
-hopping :: DFA s a -> [a] -> s
-hopping dfa = hops dfa (initial dfa)
-
 isFinal :: Eq s => DFA s a -> s -> Bool
-isFinal dfa s = isJust . find (== s) $ final dfa
-
-runDFA :: Eq s => DFA s a -> [a] -> Bool
-runDFA dfa = isFinal dfa . hopping dfa
+isFinal (DFA _ _ final) s = isJust . find (== s) $ final
 
 
 class ShowAlpha a where
   showAlpha :: a -> LT.Text
 
 instance ShowAlpha Int where
-  showAlpha n = LT.pack $ show n
+  showAlpha = LT.pack . show
 
-dfa2dot :: (Eq s, Ord s, PrintDot s, Ord a, ShowAlpha a) => DFA s a -> [s] -> [a] -> LT.Text
-dfa2dot dfa states alphas = renderDot . toDot . DotGraph False True Nothing $ stms
-  where
-    stms = DotStmts [] [] nodes edges
-    nodes = map (\s -> DotNode s $ nodeAttr s) states
-    nodeAttr s = if isFinal dfa s then [shape DoubleCircle] else [shape Circle]
-    edges = concat $ map (\(f,tls) -> map (\(t,ls) -> DotEdge f t [showLabel ls]) tls) edge_pairs
-    showLabel ls = textLabel . LT.intercalate "," $ map showAlpha ls
-    edge_pairs = [ (s,) $ collect [ (hop dfa s a, a) | a <- alphas] | s <- states ]
-    collect = map (fst . head &&& map snd) . groupBy ((==) `on` fst) . sort
+instance ShowAlpha Char where
+  showAlpha = LT.singleton
+
 
 newtype State = Q Int deriving (Show, Read, Eq, Ord)
 
 instance PrintDot State where
   unqtDot (Q n) = unqtDot $ "q" ++ show n
 
-sample_dfa :: DFA State Int
-sample_dfa = DFA sigma (Q 0) [Q 1]
+
+dfa2dot :: (Eq s, Ord s, PrintDot s, Ord a, ShowAlpha a) => DFA s a -> [s] -> [a] -> LT.Text
+dfa2dot dfa states alphas = renderDot . toDot . DotGraph False True Nothing $ stms
+  where
+    stms = DotStmts [G.GraphAttrs [G.RankDir G.FromLeft]] [] nodes edges
+    nodes = map (\s -> DotNode s $ nodeAttr s) states
+    edges = map (\(f,(t,ls)) -> DotEdge f t $ showLabel ls : edgeAttr) edge_pairs
+    showLabel ls = textLabel . LT.intercalate "," $ map showAlpha ls
+    edge_pairs = concat [ map (s,) $ collect [ (hop dfa s a, a) | a <- alphas] | s <- states ]
+    collect = map (fst . head &&& map snd) . groupBy ((==) `on` fst) . sort
+    nodeAttr s = nodeShape s : [G.FontSize 8.0, G.FixedSize G.SetNodeSize, G.Width 0.3]
+    nodeShape s = shape (if isFinal dfa s then DoubleCircle else Circle)
+    edgeAttr = [G.FontSize 8.0, G.ArrowSize 0.3]
+
+
+sample_dfa1 :: DFA State Int
+sample_dfa1 = DFA sigma (Q 0) [Q 1]
   where sigma (Q 0) 0 = Q 0
         sigma (Q 0) 1 = Q 1
         sigma (Q 1) 0 = Q 0
@@ -61,5 +64,117 @@ sample_dfa = DFA sigma (Q 0) [Q 1]
         sigma (Q 2) 0 = Q 2
         sigma (Q 2) 1 = Q 1
 
-sample_dfa_dot :: LT.Text
-sample_dfa_dot = dfa2dot sample_dfa [Q 0, Q 1, Q 2] [0, 1]
+sample_dfa_dot1 :: LT.Text
+sample_dfa_dot1 = dfa2dot sample_dfa1 [Q 0, Q 1, Q 2] [0, 1]
+
+-- prefixed with "ab"
+sample_dfa2 :: DFA State Char
+sample_dfa2 = DFA sigma (Q 0) [Q 2]
+  where sigma (Q 0) 'a' = Q 1
+        sigma (Q 0) 'b' = Q 3
+        sigma (Q 1) 'a' = Q 3
+        sigma (Q 1) 'b' = Q 2
+        sigma (Q 2) 'a' = Q 2
+        sigma (Q 2) 'b' = Q 2
+        sigma (Q 3) 'a' = Q 3
+        sigma (Q 3) 'b' = Q 3
+
+sample_dfa_dot2 :: LT.Text
+sample_dfa_dot2 = dfa2dot sample_dfa2 [Q 0, Q 1, Q 2, Q 3] ['a', 'b']
+
+-- not containing "001"
+sample_dfa3 :: DFA String Int
+sample_dfa3 = DFA sigma "0" ["λ", "0", "00"] 
+  where sigma "λ"   0 = "0"
+        sigma "λ"   1 = "λ"
+        sigma "0"   0 = "00"
+        sigma "0"   1 = "λ"
+        sigma "00"  0 = "00"
+        sigma "00"  1 = "001"
+        sigma "001" _ = "001" -- trap!
+
+sample_dfa_dot3 :: LT.Text
+sample_dfa_dot3 = dfa2dot sample_dfa3 ["λ", "0", "00", "001"] [0, 1]
+
+-- a[ab]*a
+sample_dfa4 :: DFA State Char
+sample_dfa4 = DFA sigma (Q 0) [Q 3]
+  where sigma (Q 0) 'a' = Q 2
+        sigma (Q 0) 'b' = Q 1
+        sigma (Q 1)  _  = Q 1 -- trap!
+        sigma (Q 2) 'a' = Q 3
+        sigma (Q 2) 'b' = Q 2
+        sigma (Q 3) 'a' = Q 3
+        sigma (Q 3) 'b' = Q 2
+
+sample_dfa_dot4 :: LT.Text
+sample_dfa_dot4 = dfa2dot sample_dfa4 [Q 0, Q 1, Q 2, Q 3] ['a', 'b']
+
+
+isRegular :: Eq s => DFA s a -> [a] -> Bool
+isRegular dfa@(DFA _ initial _) = isFinal dfa . hops dfa initial
+
+
+data NFA s a = NFA (s -> Maybe a -> [s]) s [s]
+
+step :: NFA s a -> (s -> Maybe a -> [s])
+step (NFA f _ _) = f
+
+atFinal :: Eq s => NFA s a -> s -> Bool
+atFinal (NFA _ _ final) s = isJust . find (== s) $ final
+
+valid_steps :: Eq s => NFA s a -> s -> [(s, Maybe a)] -> Bool
+valid_steps nfa s ls = all id $ zipWith check (s : map fst ls) ls
+  where check f (t,a) = isJust . find (== t) $ step nfa f a
+
+steps_accepted :: Eq s => NFA s a -> [(s, Maybe a)] -> Bool
+steps_accepted nfa@(NFA _ initial _) steps =
+  valid_steps nfa initial steps && atFinal nfa (last $ initial : map fst steps)
+
+
+instance ShowAlpha a => ShowAlpha (Maybe a) where
+  showAlpha Nothing = "λ"
+  showAlpha (Just a) = showAlpha a
+
+
+nfa2dot :: (Eq s, Ord s, PrintDot s, Ord a, ShowAlpha a) => NFA s a -> [s] -> [a] -> LT.Text
+nfa2dot nfa states alphas = renderDot . toDot . DotGraph False True Nothing $ stms
+  where
+    stms = DotStmts [G.GraphAttrs [G.RankDir G.FromLeft]] [] nodes edges
+    nodes = map (\s -> DotNode s $ nodeAttr s) states
+    edges = map (\(f,(t,ls)) -> DotEdge f t $ showLabel ls : edgeAttr) edge_pairs
+    showLabel ls = textLabel . LT.intercalate "," $ map showAlpha ls
+    edge_pairs = concat [ map (s,) $ collect [ map (,a) $ step nfa s a | a <- Nothing : map Just alphas] | s <- states ]
+    collect = map (fst . head &&& map snd) . groupBy ((==) `on` fst) . sort . concat
+    nodeAttr s = nodeShape s : [G.FontSize 8.0, G.FixedSize G.SetNodeSize, G.Width 0.3]
+    nodeShape s = shape (if atFinal nfa s then DoubleCircle else Circle)
+    edgeAttr = [G.FontSize 8.0, G.ArrowSize 0.3]
+
+sample_nfa1 :: NFA State Char
+sample_nfa1 = NFA sigma (Q 0) [Q 3, Q 5]
+  where sigma (Q 0) (Just 'a') = [Q 1, Q 4]
+        sigma (Q 1) (Just 'a') = [Q 2]
+        sigma (Q 2) (Just 'a') = [Q 3]
+        sigma (Q 4) (Just 'a') = [Q 5]
+        sigma (Q 5) (Just 'a') = [Q 4]
+        sigma _ _ = []
+
+sample_nfa_dot1 :: LT.Text
+sample_nfa_dot1 = nfa2dot sample_nfa1 [Q 0, Q 1, Q 2, Q 3, Q 4, Q 5] ['a']
+
+sample_nfa2 :: NFA State Int
+sample_nfa2 = NFA sigma (Q 0) [Q 0]
+  where sigma (Q 0) Nothing  = [Q 2]
+        sigma (Q 0) (Just 1) = [Q 1]
+        sigma (Q 1) (Just 0) = [Q 0, Q 2]
+        sigma (Q 1) (Just 1) = [Q 2]
+        sigma _ _ = []
+
+sample_nfa_dot2 :: LT.Text
+sample_nfa_dot2 = nfa2dot sample_nfa2 [Q 0, Q 1, Q 2] [0, 1]
+
+
+dfa2nfa :: DFA s a -> NFA s a
+dfa2nfa (DFA f initial final) = NFA f' initial final
+  where f' _ Nothing = []
+        f' s (Just x) = [f s x]
