@@ -2,11 +2,13 @@
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-import Data.Function (on)
+import Data.Function
 import Data.List (find, groupBy, sort)
-import Data.Maybe (isJust, maybeToList)
-import Data.Set (Set, (\\))
+import Data.Maybe (fromJust, maybeToList)
+import Data.Set (Set)
 import qualified Data.Set as S
+import Data.Map (Map, (!))
+import qualified Data.Map as M
 import qualified Data.Text.Lazy as LT
 import qualified Data.Text.Lazy.IO as LT
 import Data.GraphViz
@@ -193,6 +195,20 @@ instance PrintDot a => PrintDot (Set a) where
              | otherwise = G.addQuotes "'" . go $ ss
     where go = G.hcat . G.punctuate G.comma . sequenceA . map G.unqtDot . S.toAscList
 
+bfs :: Ord s => (s -> Set s) -> s -> Set s
+bfs f = bfs' f . S.singleton
+
+bfs' :: Ord s => (s -> Set s) -> Set s -> Set s
+bfs' f = bfs'' f S.empty
+  where
+    bfs'' f ret ss
+      | S.null ss = ret
+      | otherwise =
+        let (s, ss') = S.deleteFindMin ss
+        in if s `S.member` ret then bfs'' f ret ss' -- s already seen, ignore it
+           else bfs'' f (S.insert s ret) (ss `S.union` f s)
+
+
 -- it does not remove unreachable states => verbose representation.
 nfa2dfa :: Ord s => NFA s a -> DFA (Set s) a
 nfa2dfa (NFA f initial final states alphas) = DFA f' initial' final' states' alphas
@@ -225,3 +241,117 @@ sample_nfa4 = nfa sigma (Q 0) [Q 1] [Q 0 .. Q 2] [0, 1]
         sigma (Q 1) (Just _) = [Q 2]
         sigma (Q 2) (Just 1) = [Q 2]
         sigma _ _ = []
+
+removeInac :: Ord s => DFA s a -> DFA s a
+removeInac (DFA si i fi _ als) = DFA si i fi accessibles als
+  where accessibles = bfs (\s -> S.fromList $ map (si s) als) i
+
+{-
+digraph { # use fdp engine
+    graph [rankdir=LR, label=mark];
+    edge [fontsize=8, arrowsize=0.3];
+    node [fontsize=8, fixedsize=true, width=0.3];
+
+    0 [shape=circle, pos="0.0,0!"];
+    1 [shape=circle, pos="1,1!"];
+    2 [shape=circle, pos="1,-1!"];
+    3 [shape=doublecircle, pos="2.5,1!"];
+    4 [shape=doublecircle, pos="2.5,-1!"];
+
+    0 -> 1 [label=0, color=red];
+    1 -> 2 [label=0, color=red];
+    2 -> 2 [label=0, color=red];
+    3 -> 3 [label=0, color=red];
+    4 -> 4 [label=0, color=red];
+
+    0 -> 2 [label=1, color=blue];
+    1 -> 3 [label=1, color=blue];
+    2 -> 4 [label=1, color=blue];
+    3 -> 3 [label=1, color=blue];
+    4 -> 4 [label=1, color=blue];
+
+    3 -> 0 [arrowhead=none, style=bold]
+    3 -> 1 [arrowhead=none, style=bold]
+    3 -> 2 [arrowhead=none, style=bold, color=firebrick4]
+
+    4 -> 0 [arrowhead=none, style=bold]
+    4 -> 1 [arrowhead=none, style=bold]
+    4 -> 2 [arrowhead=none, style=bold, color=darkgreen]
+
+    0 -> 1 [arrowhead=none, style=dashed, color=firebrick4]
+    0 -> 2 [arrowhead=none, style=dashed, color=darkgreen]
+
+    3 -> 4 [arrowhead=none, style=dotted]
+    1 -> 2 [arrowhead=none, style=dotted]
+}
+
+the graph is redrawing of the figure 2.17 without q5 where
+red and blue arrow indicates automata transition,
+others indicates possible distinguishable pairs among which,
+solid lines indicates pairs marked distinguishable currently, (added by step 2)
+transparent lines indicates pairs WILL be marked distinguishable, (by step 3)
+dotted lines indicates indistinguishable pairs that will NEVER be mared.
+
+you can observe that we get each transparent line by pulling another solid line
+(drawn in same color) along the inverse way of arrows of a color.
+e.g. edge 0-2 can be get from 2-4 by pulling along blue lines, 0->2 and 2->4 in reversed way.
+     edge 0-1 can be get from 2-3 by pulling along blue lines, 0->2 and 1->3 in reversed way.
+
+it is natural inductive propagation of distinguishable property.
+Inductive diff (p q : State) : Prop :=
+  seed : final p ^ final q -> diff p q
+  prop : exists a in alpha, diff (step p a) (step q a) -> diff p q
+
+step 3 in `mark` procedure travels inductive propation tree in '<-' direction
+which is the reason why step 3 had to repeatedly search for every cases until
+no newer pairs are discovered without any clue.
+
+however our observation is a traversal in '->' direction (of prop).
+we can perform exhaustive search in same fasion as bfs (through graph of pairs),
+if, we could find revese of sigma function.
+-}
+
+dfa' :: Ord a => [((Int, a), Int)] -> Int -> [Int] -> [Int] -> [a] -> DFA State a
+dfa' tbl i fi st al = dfa sigma (Q i) (map Q fi) (map Q st) al
+  where sigma = curry $ Q <<< (M.fromList tbl !) <<< first (\(Q n) -> n)
+
+-- Figure 2.17
+sample_dfa5 :: DFA State Int
+sample_dfa5 = dfa' tbl 0 [3, 4] [0 .. 5] [0, 1]
+  where tbl = [ ((0,0), 1), ((0,1), 2), ((1,0), 2), ((1,1), 3)
+              , ((2,0), 2), ((2,1), 4), ((3,0), 3), ((3,1), 3)
+              , ((4,0), 4), ((4,1), 4), ((5,0), 5), ((5,1), 4) ]
+
+-- Figure 2.18
+sample_dfa6 :: DFA State Int
+sample_dfa6 = dfa' tbl 0 [2, 4] [0 .. 4] [0, 1]
+  where tbl = [ ((0,0), 1), ((0,1), 3), ((1,0), 2), ((1,1), 4)
+              , ((2,0), 1), ((2,1), 4), ((3,0), 2), ((3,1), 4)
+              , ((4,0), 4), ((4,1), 4) ]
+
+-- returns equivalence classes of indistinguishable states
+indistClss :: forall s a. (Ord s, Ord a) => DFA s a -> Set (Set s)
+indistClss (DFA sig _ final states alphas) = S.fromList $ map (bfs collect) sts
+-- indistinguishability is equivalence relation, so that result sets are all disjoint
+-- => `map (bfs collect) sts` will have (equally) duplicated sets for states that
+--    are equivalent, or completely disjoint.
+  where collect p = S.filter (isIndist p) states
+        isIndist = curry $ not . flip S.member distinguishable
+        distinguishable = bfs' propagate seeds
+        propagate (p,q) = S.fromList [ (p',q') | a <- alphas, p' <- gis p a, q' <- gis q a, p' /= q']
+        seeds = S.fromList [(p,q) | p <- sts, q <- sts, p /= q, final p `xor` final q]
+        -- (sig :: s -> a -> s) => (gis :: s -> a -> [s]) -- inverse of sig
+        gis = let maps = [((sig s a, a), [s]) | s <- sts, a <- alphas]
+                  memo = foldl (flip.uncurry $ M.insertWith (++)) M.empty maps
+               in curry $ flip (M.findWithDefault []) memo
+        sts = S.toList states
+        xor x y = not x && y || x && not y
+
+reduce :: (Ord s, Ord a) => DFA s a -> DFA (Set s) a
+reduce dfa@(DFA sig init fin _ al) = DFA sig' init' fin' states' al
+  where sig' ss a = lift . (flip sig a) . sink $ ss
+        init' = lift init
+        fin' = fin . sink
+        sink ss = S.findMin ss
+        lift s  = fromJust . find (s `elem`) $ S.toList states'
+        states' = indistClss dfa
