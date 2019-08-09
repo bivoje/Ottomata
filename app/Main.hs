@@ -329,11 +329,11 @@ sample_dfa6 = dfa' tbl 0 [2, 4] [0 .. 4] [0, 1]
 
 -- returns equivalence classes of indistinguishable states
 indistClss :: forall s a. (Ord s, Ord a) => DFA s a -> Set (Set s)
-indistClss (DFA sig _ final states alphas) = S.fromList $ map (bfs collect) sts
+indistClss (DFA sig _ final states alphas) = S.fromList $ map (bfs collectEqvClss) sts
 -- indistinguishability is equivalence relation, so that result sets are all disjoint
--- => `map (bfs collect) sts` will have (equally) duplicated sets for states that
+-- => `map (bfs collectEqvClss) sts` will have (equally) duplicated sets for states that
 --    are equivalent, or completely disjoint.
-  where collect p = S.filter (isIndist p) states
+  where collectEqvClss p = S.filter (isIndist p) states
         isIndist = curry $ not . flip S.member distinguishable
         distinguishable = bfs' propagate seeds
         propagate (p,q) = S.fromList [ (p',q') | a <- alphas, p' <- gis p a, q' <- gis q a, p' /= q']
@@ -353,3 +353,25 @@ reduce dfa@(DFA sig init fin _ al) = DFA sig' init' fin' states' al
         sink ss = S.findMin ss
         lift s  = fromJust . find (s `elem`) $ S.toList states'
         states' = indistClss dfa
+
+
+sample_dfa7 :: DFA State Int
+sample_dfa7 = dfa sigma (Q 0) [Q 1] [Q 0 .. Q 25] [0, 1, 2]
+  where sigma (Q n) a = Q . (`mod` 26) . fibo . (+ a) $ n
+        fibo 0 = 1
+        fibo 1 = 1
+        fibo n = fibo (n-1) + fibo (n-2)
+
+-- makes sigma produce fater using memoization
+quicker :: (Ord s, Ord a) => DFA s a -> DFA s a
+quicker (DFA sigma i f states alphas) = DFA sigma' i f states alphas
+  where sigma' = curry (M.fromSet (uncurry sigma) inputs !)
+        inputs = S.fromList [(s,a) | a <- alphas, s <- S.toList states]
+
+rename :: forall t s a. (Ord t, Ord s) => Set t -> DFA s a -> DFA t a
+rename states' (DFA sigma init fin states al) = DFA sigma' init' fin' states' al
+  where conv = flip S.elemAt states' . flip S.findIndex states :: s -> t
+        conv' = flip S.elemAt states . flip S.findIndex states' :: t -> s
+        sigma' = flip (\a -> conv . flip sigma a . conv')
+        init' = conv init
+        fin' = fin . conv'
