@@ -63,15 +63,16 @@ dfa2dot :: (Eq s, Ord s, PrintDot s, Ord a, ShowAlpha a) => DFA s a -> LT.Text
 dfa2dot dfa@(DFA _ _ _ states alphas) = G.renderDot $ toDot dotgraph
   where
     dotgraph = DotGraph False True Nothing stms
-    stms = DotStmts [G.GraphAttrs [G.RankDir G.FromLeft, textLabel "DFA"]] [] nodes edges
-    nodes = map (\s -> DotNode s $ nodeAttr s) $ S.toList states
-    edges = map (\(f,(t,ls)) -> DotEdge f t $ showLabel ls : edgeAttr) edge_pairs
+    stms = DotStmts [graphAttr, nodeAttr, edgeAttr] [] nodes edges
+    nodes = map (\s -> DotNode s [nodeShape s]) $ S.toList states
+    edges = map (\(f,(t,ls)) -> DotEdge f t [showLabel ls]) edge_pairs
     showLabel ls = textLabel . LT.intercalate "," $ map showAlpha ls
     edge_pairs = concat [ map (s,) $ collect [ (hop dfa s a, a) | a <- alphas] | s <- S.toList states ]
     collect = map (fst . head &&& map snd) . groupBy ((==) `on` fst) . sort
-    nodeAttr s = nodeShape s : [G.FontSize 8.0, G.FixedSize G.SetNodeSize, G.Width 0.3]
     nodeShape s = shape (if isFinal dfa s then DoubleCircle else Circle)
-    edgeAttr = [G.FontSize 8.0, G.ArrowSize 0.3]
+    graphAttr = G.GraphAttrs [G.RankDir G.FromLeft, textLabel "DFA"]
+    nodeAttr  = G.NodeAttrs  [G.FontSize 8.0, G.FixedSize G.SetNodeSize, G.Width 0.3]
+    edgeAttr  = G.EdgeAttrs  [G.FontSize 8.0, G.ArrowSize 0.3]
 
 
 sample_dfa1 :: DFA State Int
@@ -166,6 +167,7 @@ nfa2dot nfa@(NFA _ _ _ states alphas) = G.renderDot $ toDot dotgraph
     nodeShape s = shape (if atFinal nfa s then DoubleCircle else Circle)
     edgeAttr = [G.FontSize 8.0, G.ArrowSize 0.3]
 
+-- Figure 2.8
 sample_nfa1 :: NFA State Char
 sample_nfa1 = nfa sigma (Q 0) [Q 3, Q 5] [Q 0 .. Q 5] ['a']
   where sigma (Q 0) (Just 'a') = [Q 1, Q 4]
@@ -176,6 +178,7 @@ sample_nfa1 = nfa sigma (Q 0) [Q 3, Q 5] [Q 0 .. Q 5] ['a']
         sigma _ _ = []
         -- NOTE hopping haskell optimize it & compute in compile time
 
+-- Figure 2.9
 sample_nfa2 :: NFA State Int
 sample_nfa2 = nfa sigma (Q 0) [Q 0] [Q 0 .. Q 2] [0, 1]
   where sigma (Q 0) Nothing  = [Q 2]
@@ -210,21 +213,16 @@ bfs' f = bfs'' f S.empty
 
 
 -- it does not remove unreachable states => verbose representation.
-nfa2dfa :: Ord s => NFA s a -> DFA (Set s) a
+nfa2dfa :: (Ord s, Ord a) => NFA s a -> DFA (Set s) a
 nfa2dfa (NFA f initial final states alphas) = DFA f' initial' final' states' alphas
-  where f' ss a = S.unions . map (\s -> extend_lambda S.empty . f s . Just $ a) $ S.toList ss
+  where f' ss a = S.unions . map (\s -> extend_lambda . f s . Just $ a) $ S.toList ss
+          where extend_lambda = bfs' (\s -> f s Nothing)
         initial' = S.singleton initial
         final' ss = any final $ S.toList ss
+        -- NOTE S.toList works as iterator for a set (due to lazyness)
         states' = S.powerSet states
-          where powerset [] = [[]]
-                powerset (x:xs) = [x:ps | ps <- powerset xs] ++ powerset xs
-        extend_lambda ret ss
-          | S.null ss = ret
-          | otherwise =
-            let (s, ss') = S.deleteFindMin ss
-            in if s `S.member` ret then extend_lambda ret ss'
-               else extend_lambda (S.insert s ret) (ss' `S.union` f s Nothing)
 
+-- Figure 2.12
 sample_nfa3 :: NFA State Char
 sample_nfa3 = nfa sigma (Q 0) [Q 1] [Q 0 .. Q 2] ['a', 'b']
   where sigma (Q 0) (Just 'a') = [Q 1]
@@ -233,7 +231,7 @@ sample_nfa3 = nfa sigma (Q 0) [Q 1] [Q 0 .. Q 2] ['a', 'b']
         sigma (Q 2) (Just 'b') = [Q 0]
         sigma _ _ = []
 
-
+-- Figure 2.14
 sample_nfa4 :: NFA State Int
 sample_nfa4 = nfa sigma (Q 0) [Q 1] [Q 0 .. Q 2] [0, 1]
   where sigma (Q 0) (Just 0) = [Q 0, Q 1]
