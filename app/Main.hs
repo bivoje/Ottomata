@@ -327,32 +327,34 @@ sample_dfa6 = dfa' tbl 0 [2, 4] [0 .. 4] [0, 1]
               , ((2,0), 1), ((2,1), 4), ((3,0), 2), ((3,1), 4)
               , ((4,0), 4), ((4,1), 4) ]
 
--- returns equivalence classes of indistinguishable states
-indistClss :: forall s a. (Ord s, Ord a) => DFA s a -> Set (Set s)
-indistClss (DFA sig _ final states alphas) = S.fromList $ map (bfs collectEqvClss) sts
--- indistinguishability is equivalence relation, so that result sets are all disjoint
--- => `map (bfs collectEqvClss) sts` will have (equally) duplicated sets for states that
---    are equivalent, or completely disjoint.
-  where collectEqvClss p = S.filter (isIndist p) states
-        isIndist = curry $ not . flip S.member distinguishable
-        distinguishable = bfs' propagate seeds
-        propagate (p,q) = S.fromList [ (p',q') | a <- alphas, p' <- gis p a, q' <- gis q a, p' /= q']
-        seeds = S.fromList [(p,q) | p <- sts, q <- sts, p /= q, final p `xor` final q]
+-- procedure of `mark`
+mark :: (Ord s, Ord a) => DFA s a -> s -> s -> Bool
+mark (DFA sig _ final states alphas) p q =
+  let distinguishables = bfs' propagate seeds
+   in flip S.member distinguishables $ up p q
+  where -- propagates to next distinguishable pairs
+        propagate (p,q) = S.fromList [ up p' q' | a <- alphas, p' <- gis p a, q' <- gis q a, p' /= q']
+        -- strict UR half of sorted sts * sorted sts, filterd by xor-final
+        seeds = S.fromList [up p q | p <- sts, q <- sts, p /= q, final p `xor` final q]
         -- (sig :: s -> a -> s) => (gis :: s -> a -> [s]) -- inverse of sig
         gis = let maps = [((sig s a, a), [s]) | s <- sts, a <- alphas]
                   memo = foldl (flip.uncurry $ M.insertWith (++)) M.empty maps
                in curry $ flip (M.findWithDefault []) memo
         sts = S.toList states
         xor x y = not x && y || x && not y
+        up :: Ord s => s -> s -> (s,s) -- creates unordered pair
+        up x y = if compare x y == LT then (x,y) else (y,x)
 
-reduce :: (Ord s, Ord a) => DFA s a -> DFA (Set s) a
-reduce dfa@(DFA sig init fin _ al) = DFA sig' init' fin' states' al
-  where sig' ss a = lift . (flip sig a) . sink $ ss
-        init' = lift init
-        fin' = fin . sink
-        sink ss = S.findMin ss
-        lift s  = fromJust . find (s `elem`) $ S.toList states'
-        states' = indistClss dfa
+reduceIndist :: forall s a. (Ord s, Ord a) => DFA s a -> DFA (Set s) a
+reduceIndist dfa@(DFA sig init fin states al) =
+  let sig' ss a = lift . (flip sig a) . sink $ ss
+      (init', fin') = (lift init, fin . sink)
+      states' = S.fromList $ map (bfs lift) $ S.toList states
+   in DFA sig' init' fin' states' al
+  where sink ss = S.findMin ss
+        lift p = S.filter (isIndist p) states
+        isIndist p q = not $ marked p q
+        marked = mark dfa
 
 
 sample_dfa7 :: DFA State Int
@@ -364,9 +366,10 @@ sample_dfa7 = dfa sigma (Q 0) [Q 1] [Q 0 .. Q 25] [0, 1, 2]
 
 -- makes sigma produce fater using memoization
 quicker :: (Ord s, Ord a) => DFA s a -> DFA s a
-quicker (DFA sigma i f states alphas) = DFA sigma' i f states alphas
+quicker (DFA sigma i final states alphas) = DFA sigma' i final' states alphas
   where sigma' = curry (M.fromSet (uncurry sigma) inputs !)
         inputs = S.fromList [(s,a) | a <- alphas, s <- S.toList states]
+        final' = (M.fromSet final states !)
 
 rename :: forall t s a. (Ord t, Ord s) => Set t -> DFA s a -> DFA t a
 rename states' (DFA sigma init fin states al) = DFA sigma' init' fin' states' al
