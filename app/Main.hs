@@ -19,25 +19,47 @@ import Control.Arrow
 import qualified Control.Monad.State as ST
 
 
+infixl 8 .+
+(.+) :: (c -> d) -> (a -> b -> c) -> (a -> b -> d)
+(.+) g f a b = g $ f a b
+
 list2final :: Ord s => [s] -> s -> Bool
 list2final ls s = S.member s $ S.fromList ls
 
 
+data FAT s a t = FAT
+  { hop :: (s -> a -> t s)
+  , initial :: s
+  , final :: (s -> Bool)
+  , states :: (Set s)
+  , alphas :: [a]
+  }
+
+
+class AsList t where
+  toList :: t a -> [a]
+  fromList :: [a] -> t a
+
+instance AsList [] where
+  toList = id
+  fromList = id
+
+
+newtype Single a = Single { unsin :: a }
+
+instance AsList Single where
+  toList (Single x) = [x]
+  fromList = Single . head
+
+
 -- DFA sigma initial final states alphabets
-data DFA s a = DFA (s -> a -> s) s (s -> Bool) (Set s) [a]
+type DFA s a = FAT s a Single
 
 dfa :: Ord s => (s -> a -> s) -> s -> [s] -> [s] -> [a] -> DFA s a
-dfa si i fi st al = DFA si i (list2final fi) (S.fromList st) al
-
-
-hop :: DFA s a -> (s -> a -> s)
-hop (DFA f _ _ _ _) = f
+dfa si i fi st al = FAT (Single .+ si) i (list2final fi) (S.fromList st) al
 
 hops :: DFA s a -> s -> [a] -> s
-hops dfa = foldl $ hop dfa
-
-isFinal :: DFA s a -> s -> Bool
-isFinal (DFA _ _ final _ _) = final
+hops dfa = unsin .+ foldl (hop dfa . unsin) . Single
 
 
 class ShowAlpha a where
@@ -60,17 +82,26 @@ instance PrintDot State where
   unqtDot (Q n) = unqtDot $ "q" ++ show n
 
 
-dfa2dot :: (Eq s, Ord s, PrintDot s, Ord a, ShowAlpha a) => DFA s a -> LT.Text
-dfa2dot dfa@(DFA _ _ _ states alphas) = G.renderDot $ toDot dotgraph
+collectEdges :: (Ord a, Ord s, AsList t) => (s -> a -> t s) -> Set s -> [a] -> [(s,s,[a])]
+collectEdges sig sts al = [ (f,t,ls) | f <- S.toList sts, (ls,t) <- deref (sprouts f) ]
+  where --sprouts :: s -> [(a, [s])] -- collection of (dests, transition) from a state
+        sprouts s = [ (a, toList $ sig s a) | a <- al]
+        --deref :: [(a, [s])] -> [([a], s)] -- both deeply sorted
+        deref = map (map fst &&& snd . head) . groupBy ((==) `on` snd) . sort . flatr
+          -- FIXME optimize sorting
+          where flatr = (uncurry (map . (,)) =<<) :: [(a,[s])] -> [(a, s)]
+
+fat2dot :: (Eq s, Ord s, PrintDot s, Ord a, ShowAlpha a, AsList t)
+      => FAT s a t -> LT.Text
+fat2dot (FAT sig _ final states alphas) = G.renderDot $ toDot dotgraph
   where
     dotgraph = DotGraph False True Nothing stms
     stms = DotStmts [graphAttr, nodeAttr, edgeAttr] [] nodes edges
     nodes = map (\s -> DotNode s [nodeShape s]) $ S.toList states
-    edges = map (\(f,(t,ls)) -> DotEdge f t [showLabel ls]) edge_pairs
+    edges = map (\(f,t,ls) -> DotEdge f t [showLabel ls]) edge_pairs
     showLabel ls = textLabel . LT.intercalate "," $ map showAlpha ls
-    edge_pairs = concat [ map (s,) $ collect [ (hop dfa s a, a) | a <- alphas] | s <- S.toList states ]
-    collect = map (fst . head &&& map snd) . groupBy ((==) `on` fst) . sort
-    nodeShape s = shape (if isFinal dfa s then DoubleCircle else Circle)
+    edge_pairs = collectEdges sig states alphas
+    nodeShape s = shape (if final s then DoubleCircle else Circle)
     graphAttr = G.GraphAttrs [G.RankDir G.FromLeft, textLabel "DFA"]
     nodeAttr  = G.NodeAttrs  [G.FontSize 8.0, G.FixedSize G.SetNodeSize, G.Width 0.3]
     edgeAttr  = G.EdgeAttrs  [G.FontSize 8.0, G.ArrowSize 0.3]
@@ -121,54 +152,42 @@ sample_dfa4 = dfa sigma (Q 0) [Q 3] [Q 0 .. Q 3] ['a', 'b']
 
 
 isRegular :: Ord s => DFA s a -> [a] -> Bool
-isRegular dfa@(DFA _ initial _ _ _) = isFinal dfa . hops dfa initial
+isRegular dfa = final dfa . hops dfa (initial dfa)
 
 
 -- NFA sigma initial final states alphabets
-data NFA s a = NFA (s -> Maybe a -> Set s) s (s -> Bool) (Set s) [a]
+type NFA s a = FAT s (Maybe a) Set
 
 nfa :: Ord s => (s -> Maybe a -> [s]) -> s -> [s] -> [s] -> [a] -> NFA s a
-nfa sigma' i final' states' al = NFA sigma i final states al
+nfa sigma' i final' states' alphas' = FAT sigma i final states alphas
   where sigma = (S.fromList .) . sigma'
         final = list2final final'
         states = S.fromList states'
+        alphas = Nothing : map Just alphas'
 
-
-step :: NFA s a -> (s -> Maybe a -> Set s)
-step (NFA f _ _ _ _) = f
-
-atFinal :: NFA s a -> s -> Bool
-atFinal (NFA _ _ final _ _) = final
 
 valid_steps :: Ord s => NFA s a -> s -> [(s, Maybe a)] -> Bool
 valid_steps nfa s ls = all id $ zipWith check (s : map fst ls) ls
-  where check f (t,a) = S.member t $ step nfa f a
+  where check f (t,a) = S.member t $ hop nfa f a
 
 steps_accepted :: Ord s => NFA s a -> [(s, Maybe a)] -> Bool
-steps_accepted nfa@(NFA _ initial _ _ _) steps =
-  valid_steps nfa initial steps && atFinal nfa (last $ initial : map fst steps)
+steps_accepted nfa steps =
+  let valid = valid_steps nfa (initial nfa) steps
+      atGoal = final nfa (last $ initial nfa : map fst steps)
+   in valid && atGoal
 
 
 instance ShowAlpha a => ShowAlpha (Maybe a) where
   showAlpha Nothing = "λ"
   showAlpha (Just a) = showAlpha a
 
+instance AsList Set where
+  toList = S.toList
+  fromList :: forall a. [a] -> Set a
+  fromList = S.fromList
 
 nfa2dot :: (Eq s, Ord s, PrintDot s, Ord a, ShowAlpha a) => NFA s a -> LT.Text
-nfa2dot nfa@(NFA _ _ _ states alphas) = G.renderDot $ toDot dotgraph
-  where
-    dotgraph = DotGraph False True Nothing stms
-    stms = DotStmts [graphAttr, nodeAttr, edgeAttr] [] nodes edges
-    nodes = map (\s -> DotNode s [nodeShape s]) $ S.toList states
-    edges = map (\(f,(t,ls)) -> DotEdge f t [showLabel ls]) edge_pairs
-    showLabel ls = textLabel . LT.intercalate "," $ map showAlpha ls
-    edge_pairs = concat [ map (s,) $ collect [ map (,a) . S.toList $ step nfa s a | a <- Nothing : map Just alphas] | s <- S.toList states ]
-    collect = map (fst . head &&& map snd) . groupBy ((==) `on` fst) . sort . concat
-    nodeShape s = shape (if atFinal nfa s then DoubleCircle else Circle)
-    graphAttr = G.GraphAttrs [G.RankDir G.FromLeft, textLabel "DFA"]
-    nodeAttr  = G.NodeAttrs  [G.FontSize 8.0, G.FixedSize G.SetNodeSize, G.Width 0.3]
-    edgeAttr  = G.EdgeAttrs  [G.FontSize 8.0, G.ArrowSize 0.3]
-
+nfa2dot = fat2dot
 
 
 -- Figure 2.8
@@ -193,10 +212,12 @@ sample_nfa2 = nfa sigma (Q 0) [Q 0] [Q 0 .. Q 2] [0, 1]
 
 
 dfa2nfa :: Ord s => DFA s a -> NFA s a
-dfa2nfa (DFA f initial final states alphas) = NFA f' initial final states alphas
-  where f' s mx = S.fromList . maybeToList $ f s <$> mx
+dfa2nfa dfa =
+  let hop' s mx = S.fromList . maybeToList $ (unsin . hop dfa s) <$> mx
+   in dfa { hop = hop' }
 
 
+{-}
 instance PrintDot a => PrintDot (Set a) where
   unqtDot ss | S.null ss = unqtDot ("∅" :: LT.Text)
              | otherwise = G.addQuotes "'" . go $ ss
@@ -302,7 +323,7 @@ e.g. edge 0-2 can be get from 2-4 by pulling along blue lines, 0->2 and 2->4 in 
 it is natural inductive propagation of distinguishable property.
 Inductive diff (p q : State) : Prop :=
   seed : final p ^ final q -> diff p q
-  prop : exists a in alpha, diff (step p a) (step q a) -> diff p q
+  prop : exists a in alpha, diff (hop p a) (hop q a) -> diff p q
 
 step 3 in `mark` procedure travels inductive propation tree in '<-' direction
 which is the reason why step 3 had to repeatedly search for every cases until
@@ -533,3 +554,14 @@ sample_rex2 =
           (Prim (Just 'a'))
           (Prim (Just 'b')))
         (Clos (Prim (Just 'c')))))
+
+{-
+newtype GTG s a = Map (s,s) (Rex a)
+
+nfa2gtg :: Ord s => NFA s a -> GTG s a
+nfa2gtg (NFA sig i f ss al) =
+  let m = 
+   in fold fillDummy m [ (p,q) | p <- S.toList ss, q <- S.toList ss ]
+  where fillDummy m pq= M.insert pq Nill m
+-}
+-}
