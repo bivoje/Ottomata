@@ -432,7 +432,6 @@ rex2nfa rex =
       states = S.fromList [Q 0 .. pred q]
       alphabets = S.toList $ rex2alphas rex
    in NFA (build sig) init (==fin) states alphabets
-  where
 
 rex2alphas :: Ord a => Rex a -> Set a
 rex2alphas (Prim (Just a)) = S.singleton a
@@ -441,7 +440,8 @@ rex2alphas (Cat nl nr) = (S.union `on` rex2alphas) nl nr
 rex2alphas (Clos na) = rex2alphas na
 rex2alphas _ = S.empty
 
-rex2nfa' :: Eq a => Rex a -> Inc State (NFA' State a)
+-- generates nfa that follows conversion rules strictly
+rex2nfa' :: (Enum s, Ord s, Ord a) => Rex a -> Inc s (NFA' s a)
 rex2nfa' Nill = NFA' mempty <$> next <*> next
 rex2nfa' (Prim ma) = do
   [init, fin] <- following 2
@@ -469,6 +469,43 @@ rex2nfa' (Clos na) = do
             & wire fin Nothing init
   return $ NFA' sig init fin
 
+
+rex2nfa_simpler :: Ord a => Rex a -> NFA State a
+rex2nfa_simpler rex =
+  let (sig, q) = runInc (rex2nfa'' rex (Q 0) (Q 1)) (Q 2)
+      states = S.fromList [Q 0 .. pred q]
+      alphabets = S.toList $ rex2alphas rex
+   in NFA (build sig) (Q 0) (== Q 1) states alphabets
+
+-- gnerates more simpler nfa (omitting redundant lambda transitions..)
+rex2nfa'' :: (Enum s, Ord s, Eq a) => Rex a -> s -> s -> Inc s (SigBuilder s a)
+rex2nfa'' Nill _ _ = return mempty
+rex2nfa'' (Prim ma) i f = return $ mempty & wire i ma f
+rex2nfa'' (Alt nl nr) i f = do
+  sigl <- rex2nfa'' nl i f
+  sigr <- rex2nfa'' nr i f
+  return $ sigl <> sigr
+rex2nfa'' (Cat nl nr) i f = do
+  mid <- next
+  sigl <- rex2nfa'' nl i mid
+  sigr <- rex2nfa'' nr mid f
+  return $  sigl <> sigr
+rex2nfa'' (Clos na) i f = do
+  [init, fin] <- following 2
+  sig <- rex2nfa'' na init fin
+  return $ sig
+           & wire init Nothing fin
+           & wire fin Nothing init
+           & wire i Nothing init
+           & wire fin Nothing f
+{- FIXME it does not generate neither smallest nor correct for sample_rex1
+  rex2nfa'' (Clos na) i f = do
+  sig <- rex2nfa'' na i f
+  return $ sig
+           & wire i Nothing f
+           & wire f Nothing i-}
+
+-- Figure 3.6 (0+11)*(10*+2)
 sample_rex1 :: Rex Int
 sample_rex1 =
   Cat
@@ -481,8 +518,10 @@ sample_rex1 =
       (Cat
         (Prim (Just 1))
         (Clos (Prim (Just 0))))
-      (Prim Nothing))
+      --(Prim Nothing))
+      (Prim (Just 2)))
 
+-- Example 3.8 a*+a*(a+b)c*
 sample_rex2 :: Rex Char
 sample_rex2 =
   Alt
