@@ -3,11 +3,11 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 import Data.Function
-import Data.List (find, groupBy, sort)
-import Data.Maybe (fromJust, maybeToList)
+import Data.List (groupBy, sort)
+import Data.Maybe (maybeToList)
 import Data.Set (Set)
 import qualified Data.Set as S
-import Data.Map (Map, (!))
+import Data.Map ((!))
 import qualified Data.Map as M
 import qualified Data.Text.Lazy as LT
 import qualified Data.Text.Lazy.IO as LT
@@ -16,6 +16,7 @@ import qualified Data.GraphViz.Printing as G
 import qualified Data.GraphViz.Attributes.Complete as G
 import qualified Data.GraphViz.Types.Canonical as G
 import Control.Arrow
+import qualified Control.Monad.State as ST
 
 
 list2final :: Ord s => [s] -> s -> Bool
@@ -157,15 +158,18 @@ nfa2dot :: (Eq s, Ord s, PrintDot s, Ord a, ShowAlpha a) => NFA s a -> LT.Text
 nfa2dot nfa@(NFA _ _ _ states alphas) = G.renderDot $ toDot dotgraph
   where
     dotgraph = DotGraph False True Nothing stms
-    stms = DotStmts [G.GraphAttrs [G.RankDir G.FromLeft, textLabel "NFA"]] [] nodes edges
-    nodes = map (\s -> DotNode s $ nodeAttr s) $ S.toList states
-    edges = map (\(f,(t,ls)) -> DotEdge f t $ showLabel ls : edgeAttr) edge_pairs
+    stms = DotStmts [graphAttr, nodeAttr, edgeAttr] [] nodes edges
+    nodes = map (\s -> DotNode s [nodeShape s]) $ S.toList states
+    edges = map (\(f,(t,ls)) -> DotEdge f t [showLabel ls]) edge_pairs
     showLabel ls = textLabel . LT.intercalate "," $ map showAlpha ls
     edge_pairs = concat [ map (s,) $ collect [ map (,a) . S.toList $ step nfa s a | a <- Nothing : map Just alphas] | s <- S.toList states ]
     collect = map (fst . head &&& map snd) . groupBy ((==) `on` fst) . sort . concat
-    nodeAttr s = nodeShape s : [G.FontSize 8.0, G.FixedSize G.SetNodeSize, G.Width 0.3]
     nodeShape s = shape (if atFinal nfa s then DoubleCircle else Circle)
-    edgeAttr = [G.FontSize 8.0, G.ArrowSize 0.3]
+    graphAttr = G.GraphAttrs [G.RankDir G.FromLeft, textLabel "DFA"]
+    nodeAttr  = G.NodeAttrs  [G.FontSize 8.0, G.FixedSize G.SetNodeSize, G.Width 0.3]
+    edgeAttr  = G.EdgeAttrs  [G.FontSize 8.0, G.ArrowSize 0.3]
+
+
 
 -- Figure 2.8
 sample_nfa1 :: NFA State Char
@@ -378,3 +382,115 @@ rename states' (DFA sigma init fin states al) = DFA sigma' init' fin' states' al
         sigma' = flip (\a -> conv . flip sigma a . conv')
         init' = conv init
         fin' = fin . conv'
+
+
+type Inc n = ST.State n
+
+next :: Enum n => Inc n n
+next = ST.get >>= \n -> ST.modify succ >> return n
+
+following :: Enum n => Int -> Inc n [n]
+following m = ST.get >>= \n ->
+  let ls = take m $ iterate succ n
+  in ST.put (succ $ last ls) >> return ls
+
+runInc :: Inc n a -> n -> (a, n)
+runInc = ST.runState
+
+
+newtype SigBuilder s a = SigBuilder { build :: s -> Maybe a -> Set s }
+
+wire :: (Ord s, Eq a) => s -> Maybe a -> s -> SigBuilder s a -> SigBuilder s a
+wire init malpha fin sb = SigBuilder $ \s ma ->
+  if s == init && ma == malpha then fin `S.insert` build sb s ma
+  else build sb s ma
+
+instance Ord s => Semigroup (SigBuilder s a) where
+  sb1 <> sb2 = SigBuilder $ \s ma ->
+    build sb1 s ma `S.union` build sb2 s ma
+
+instance Ord s => Monoid (SigBuilder s a) where
+  mempty = SigBuilder $ const (const S.empty)
+
+
+data NFA' s a = NFA' (SigBuilder s a) s s
+
+
+-- Rex is strict to force finite structure
+data Rex a
+  = Nill
+  | Prim !(Maybe a)
+  | Alt !(Rex a) !(Rex a)
+  | Cat !(Rex a) !(Rex a)
+  | Clos !(Rex a)
+  deriving (Show, Read, Eq)
+
+
+rex2nfa :: Ord a => Rex a -> NFA State a
+rex2nfa rex =
+  let (NFA' sig init fin, q) = runInc (rex2nfa' rex) (Q 0)
+      states = S.fromList [Q 0 .. pred q]
+      alphabets = S.toList $ rex2alphas rex
+   in NFA (build sig) init (==fin) states alphabets
+  where
+
+rex2alphas :: Ord a => Rex a -> Set a
+rex2alphas (Prim (Just a)) = S.singleton a
+rex2alphas (Alt nl nr) = (S.union `on` rex2alphas) nl nr
+rex2alphas (Cat nl nr) = (S.union `on` rex2alphas) nl nr
+rex2alphas (Clos na) = rex2alphas na
+rex2alphas _ = S.empty
+
+rex2nfa' :: Eq a => Rex a -> Inc State (NFA' State a)
+rex2nfa' Nill = NFA' mempty <$> next <*> next
+rex2nfa' (Prim ma) = do
+  [init, fin] <- following 2
+  return $ NFA' (mempty & wire init ma fin) init fin
+rex2nfa' (Alt nl nr) = do
+  init <- next
+  NFA' sigl initl finl <- rex2nfa' nl
+  NFA' sigr initr finr <- rex2nfa' nr
+  fin <- next
+  let sig = sigl <> sigr
+            & wire init Nothing initl
+            & wire init Nothing initr
+            & wire finl Nothing fin
+            & wire finr Nothing fin
+  return $ NFA' sig init fin
+rex2nfa' (Cat nl nr) = do
+  NFA' sigl initl finl <- rex2nfa' nl
+  NFA' sigr initr finr <- rex2nfa' nr
+  let sig = sigl <> sigr & wire finl Nothing initr
+  return $ NFA' sig initl finr
+rex2nfa' (Clos na) = do
+  NFA' sig' init fin <- rex2nfa' na
+  let sig = sig'
+            & wire init Nothing fin
+            & wire fin Nothing init
+  return $ NFA' sig init fin
+
+sample_rex1 :: Rex Int
+sample_rex1 =
+  Cat
+    (Clos (Alt
+        (Prim (Just 0))
+        (Cat
+          (Prim (Just 1))
+          (Prim (Just 1)))))
+    (Alt
+      (Cat
+        (Prim (Just 1))
+        (Clos (Prim (Just 0))))
+      (Prim Nothing))
+
+sample_rex2 :: Rex Char
+sample_rex2 =
+  Alt
+    (Clos (Prim (Just 'a')))
+    (Cat
+      (Clos (Prim (Just 'b')))
+      (Cat
+        (Alt
+          (Prim (Just 'a'))
+          (Prim (Just 'b')))
+        (Clos (Prim (Just 'c')))))
