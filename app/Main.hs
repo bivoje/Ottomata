@@ -3,11 +3,14 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 import Data.Function
-import Data.List (groupBy, sort)
-import Data.Maybe (maybeToList)
+import Data.List (groupBy, sort, find)
+import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.List.NonEmpty as N
+import Data.Maybe (fromJust, maybeToList)
+import Data.Monoid (Endo (..))
 import Data.Set (Set)
 import qualified Data.Set as S
-import Data.Map ((!))
+import Data.Map (Map, (!))
 import qualified Data.Map as M
 import qualified Data.Text.Lazy as LT
 import qualified Data.Text.Lazy.IO as LT
@@ -16,8 +19,13 @@ import qualified Data.GraphViz.Printing as G
 import qualified Data.GraphViz.Attributes.Complete as G
 import qualified Data.GraphViz.Types.Canonical as G
 import Control.Arrow
+import Control.Monad
 import qualified Control.Monad.State as ST
 
+
+infixr 8 .+
+(.+) :: (c -> d) -> (a -> b -> c) -> (a -> b -> d)
+(.+) g f a b = g $ f a b
 
 list2final :: Ord s => [s] -> s -> Bool
 list2final ls s = S.member s $ S.fromList ls
@@ -59,17 +67,24 @@ instance Enum State where
 instance PrintDot State where
   unqtDot (Q n) = unqtDot $ "q" ++ show n
 
+collectEdges :: (Ord s, Ord a) => (s -> a -> [s]) -> Set s -> [a] -> [(s,s, NonEmpty a)]
+collectEdges sig sts al = [ (f,t,ls) | f <- S.toList sts, (ls,t) <- deref (sprouts f) ]
+  where --sprouts :: s -> [(a, [s])] -- collection of (dests, transition) from a state
+        sprouts s = [ (a, sig s a) | a <- al]
+        --deref :: [(a, [s])] -> [([a], s)] -- both deeply sorted
+        deref = map (N.fromList . map fst &&& snd . head) . groupBy ((==) `on` snd) . sort . flatr
+          -- FIXME optimize sorting
+          where flatr = (uncurry (map . (,)) =<<) :: [(a,[s])] -> [(a, s)]
 
 dfa2dot :: (Eq s, Ord s, PrintDot s, Ord a, ShowAlpha a) => DFA s a -> LT.Text
-dfa2dot dfa@(DFA _ _ _ states alphas) = G.renderDot $ toDot dotgraph
+dfa2dot dfa@(DFA sig _ _ states alphas) = G.renderDot $ toDot dotgraph
   where
     dotgraph = DotGraph False True Nothing stms
     stms = DotStmts [graphAttr, nodeAttr, edgeAttr] [] nodes edges
     nodes = map (\s -> DotNode s [nodeShape s]) $ S.toList states
-    edges = map (\(f,(t,ls)) -> DotEdge f t [showLabel ls]) edge_pairs
-    showLabel ls = textLabel . LT.intercalate "," $ map showAlpha ls
-    edge_pairs = concat [ map (s,) $ collect [ (hop dfa s a, a) | a <- alphas] | s <- S.toList states ]
-    collect = map (fst . head &&& map snd) . groupBy ((==) `on` fst) . sort
+    edges = map (\(f,t,ls) -> DotEdge f t [showLabel ls]) edge_pairs
+    showLabel ls = textLabel . LT.intercalate "," . map showAlpha $ N.toList ls
+    edge_pairs = collectEdges ((:[]) .+ sig) states alphas
     nodeShape s = shape (if isFinal dfa s then DoubleCircle else Circle)
     graphAttr = G.GraphAttrs [G.RankDir G.FromLeft, textLabel "DFA"]
     nodeAttr  = G.NodeAttrs  [G.FontSize 8.0, G.FixedSize G.SetNodeSize, G.Width 0.3]
@@ -153,22 +168,20 @@ instance ShowAlpha a => ShowAlpha (Maybe a) where
   showAlpha Nothing = "λ"
   showAlpha (Just a) = showAlpha a
 
-
+-- almost equal to dfa2dot...
 nfa2dot :: (Eq s, Ord s, PrintDot s, Ord a, ShowAlpha a) => NFA s a -> LT.Text
-nfa2dot nfa@(NFA _ _ _ states alphas) = G.renderDot $ toDot dotgraph
+nfa2dot nfa@(NFA sig _ _ states alphas) = G.renderDot $ toDot dotgraph
   where
     dotgraph = DotGraph False True Nothing stms
     stms = DotStmts [graphAttr, nodeAttr, edgeAttr] [] nodes edges
     nodes = map (\s -> DotNode s [nodeShape s]) $ S.toList states
-    edges = map (\(f,(t,ls)) -> DotEdge f t [showLabel ls]) edge_pairs
-    showLabel ls = textLabel . LT.intercalate "," $ map showAlpha ls
-    edge_pairs = concat [ map (s,) $ collect [ map (,a) . S.toList $ step nfa s a | a <- Nothing : map Just alphas] | s <- S.toList states ]
-    collect = map (fst . head &&& map snd) . groupBy ((==) `on` fst) . sort . concat
+    edges = map (\(f,t,ls) -> DotEdge f t [showLabel ls]) edge_pairs
+    showLabel ls = textLabel . LT.intercalate "," . map showAlpha $ N.toList ls
+    edge_pairs = collectEdges (S.toList .+ sig) states (Nothing : map Just alphas)
     nodeShape s = shape (if atFinal nfa s then DoubleCircle else Circle)
     graphAttr = G.GraphAttrs [G.RankDir G.FromLeft, textLabel "DFA"]
     nodeAttr  = G.NodeAttrs  [G.FontSize 8.0, G.FixedSize G.SetNodeSize, G.Width 0.3]
     edgeAttr  = G.EdgeAttrs  [G.FontSize 8.0, G.ArrowSize 0.3]
-
 
 
 -- Figure 2.8
@@ -425,6 +438,44 @@ data Rex a
   | Clos !(Rex a)
   deriving (Show, Read, Eq)
 
+-- implemented Num only to utilize operators.
+-- as in http://hackage.haskell.org/package/algebraic-graphs-0.4/docs/Algebra-Graph.html#t:Graph
+instance Num (Rex a) where
+  (+) = Alt
+  (*) = Cat
+  abs = undefined
+  signum = undefined
+  fromInteger 0 = Nill
+  fromInteger _ = undefined
+  negate = undefined
+
+λ :: Rex a
+λ = Prim Nothing
+
+ε :: a -> Rex a
+ε = Prim . Just
+
+-- Figure 3.6 (0+11)*(10*+2)
+sample_rex1 :: Rex Int
+sample_rex1 = (Clos $ ε 0 + ε 1 * ε 1) * (ε 1 * Clos (ε 0) + ε 2)
+
+
+instance ShowAlpha a => ShowAlpha (Rex a) where
+  showAlpha rex = go rex where
+    go (Nill)         = "∅"
+    go (Prim Nothing) = "λ"
+    go (Prim (Just a)) = showAlpha a
+    go (Alt r1 r2) = wrap 0 r1 +++ "+" +++ wrap 0 r2
+    go (Cat r1 r2) = wrap 1 r1 +++         wrap 1 r2
+    go (Clos r) = wrap 2 r +++ "*"
+    wrap :: Int -> Rex a -> LT.Text
+    wrap n r = if rexPrec r >= n then go r
+               else "(" +++ go r +++ ")"
+    rexPrec (Alt _ _) = 0
+    rexPrec (Cat _ _) = 1
+    rexPrec (Clos _)  = 2
+    rexPrec _ = 3
+    (+++) = LT.append
 
 rex2nfa :: Ord a => Rex a -> NFA State a
 rex2nfa rex =
@@ -478,6 +529,7 @@ rex2nfa_simpler rex =
    in NFA (build sig) (Q 0) (== Q 1) states alphabets
 
 -- gnerates more simpler nfa (omitting redundant lambda transitions..)
+-- validity is not guaranteed
 rex2nfa'' :: (Enum s, Ord s, Eq a) => Rex a -> s -> s -> Inc s (SigBuilder s a)
 rex2nfa'' Nill _ _ = return mempty
 rex2nfa'' (Prim ma) i f = return $ mempty & wire i ma f
@@ -505,31 +557,160 @@ rex2nfa'' (Clos na) i f = do
            & wire i Nothing f
            & wire f Nothing i-}
 
--- Figure 3.6 (0+11)*(10*+2)
-sample_rex1 :: Rex Int
-sample_rex1 =
-  Cat
-    (Clos (Alt
-        (Prim (Just 0))
-        (Cat
-          (Prim (Just 1))
-          (Prim (Just 1)))))
-    (Alt
-      (Cat
-        (Prim (Just 1))
-        (Clos (Prim (Just 0))))
-      --(Prim Nothing))
-      (Prim (Just 2)))
-
 -- Example 3.8 a*+a*(a+b)c*
 sample_rex2 :: Rex Char
-sample_rex2 =
-  Alt
-    (Clos (Prim (Just 'a')))
-    (Cat
-      (Clos (Prim (Just 'b')))
-      (Cat
-        (Alt
-          (Prim (Just 'a'))
-          (Prim (Just 'b')))
-        (Clos (Prim (Just 'c')))))
+sample_rex2 = (Clos $ ε 'a') + (Clos $ ε 'a') * (ε 'a' + ε 'b') * (Clos $ ε 'c')
+
+
+-- (complete) Generalized Transfer Graph
+-- keeps list of nodes (staets) in the graph
+-- where [fin, init] is the last elem
+data GTG s a = GTG
+  { getRexMap :: Map (s,s) (Rex a)
+  , getStates :: [s]
+  } deriving (Show, Read, Eq)
+
+splitLast2 :: [a] -> ([a], [a])
+splitLast2 [] = ([],[])
+splitLast2 [a] = ([],[a])
+splitLast2 [a,b] = ([],[a,b])
+splitLast2 (c:ab) = first (c:) $ splitLast2 ab
+
+
+monofinNFA :: (Ord s, Eq a) => s -> NFA s a -> (NFA s a, s)
+monofinNFA fin' nfa@(NFA sig ini final states al) =
+  let fins = filter final $ S.toList states
+      wires = map (\f -> Endo $ wire f Nothing fin') fins -- isn't it sub-optimal? `if s `elem` fins -> fin' ???
+      sig' = build . appEndo (mconcat wires) $ SigBuilder sig
+      states' = fin' `S.insert` states
+      nfa' = NFA sig' ini (==fin') states' al
+   in case fins of
+        [f] | f /= ini -> (nfa, f)
+        _ -> (nfa', fin')
+
+nfa2gtg :: (Ord s, Ord a) => s -> NFA s a -> GTG s a
+nfa2gtg fin' nfa =
+  let (NFA sig ini _ states alphas, fin) = monofinNFA fin' nfa
+      edge_pairs = collectEdges (S.toList .+ sig) states (Nothing : map Just alphas)
+      partial = foldl (\m (f,t,ls) -> M.insert (f,t) (as2r ls) m) M.empty edge_pairs
+      full = foldl insertDummy partial [(p,q) | p <- S.toList states, q <- S.toList states ]
+      states' = S.toList . S.delete fin . S.delete ini $ states
+   in GTG full $ states' ++ [ini, fin]
+  where as2r (a:|[]) = Prim a
+        as2r as = let (ls, rs) = halve as in (Alt `on` as2r) ls rs
+        halve xs = -- halve assumes `length xs >= 2`
+          let n = (length xs) `div` 2
+           in (N.fromList $ N.take n xs, N.fromList $ N.drop n xs)
+        insertDummy m pq = M.insertWith (flip const) pq Nill m
+
+
+gtg2dot :: (PrintDot s, ShowAlpha a) => GTG s a -> LT.Text
+gtg2dot (GTG m ss) = G.renderDot $ toDot dotgraph
+  where
+    dotgraph = DotGraph False True Nothing stms
+    stms = DotStmts [graphAttr, nodeAttr, edgeAttr] [] nodes edges
+    nodes = uncurry (++) <<< circle *** dcircle <<< init &&& (:[]) . last $ ss
+      where circle  = map $ flip DotNode [shape Circle]
+            dcircle = map $ flip DotNode [shape DoubleCircle]
+    edges = map (\((f,t),r) -> DotEdge f t [textLabel $ showAlpha r]) $ M.toList m
+    graphAttr = G.GraphAttrs [G.RankDir G.FromLeft, textLabel "GTG"]
+    nodeAttr  = G.NodeAttrs  [G.FontSize 8.0, G.FixedSize G.SetNodeSize, G.Width 0.3]
+    edgeAttr  = G.EdgeAttrs  [G.FontSize 8.0, G.ArrowSize 0.3]
+
+
+gtg2rex' :: Ord s => GTG s a -> Rex a
+gtg2rex' gtg@(GTG m states) = case states of
+  -- DFA/NFA has at least 1 state (initial)
+  -- GTG has at least 2 states (initial, monofin)
+  [ini, fin] ->
+    let r1 = m ! (ini, ini)
+        r2 = m ! (ini, fin)
+        r3 = m ! (fin, ini)
+        r4 = m ! (fin, fin)
+        r1' = Clos r1
+     in r1' * r2 * Clos (r4 + r3 * r1' * r2)
+  _ -> gtg2rex' . reduceGTG $ gtg
+
+reduceGTG :: forall s a. Ord s => GTG s a -> GTG s a
+reduceGTG (GTG m (s:ss)) =
+  let withS (p,q) = p == s || q == s
+      updates = [alienate p s q | p <- ss, q <- ss, p /= q]
+      removal = Endo $ M.filterWithKey (const . not . withS)
+      m' = appEndo (mconcat updates <> removal) m
+   in GTG m' ss
+  where alienate :: s -> s -> s -> Endo (Map (s,s) (Rex a))
+        alienate _1 _2 _3 = -- removing 2
+          let [a, b] = map (m!) [(_1,_2), (_2,_1)]
+              [c, d] = map (m!) [(_2,_3), (_3,_2)]
+              [h, i] = map (m!) [(_1,_3), (_3,_1)]
+              [e, f, g] = map (m!) [(_1,_1), (_2,_2), (_3,_3)]
+              f' = Clos f
+           in mconcat
+              [ upd (_1,_1) $ e + a * f' * b
+              , upd (_1,_3) $ h + a * f' * c
+              , upd (_3,_1) $ i + d * f' * b
+              , upd (_3,_3) $ g + d * f' * c
+              ]
+            where upd :: (s,s) -> Rex a -> Endo (Map (s,s) (Rex a))
+                  upd pq v = Endo $ M.adjust (const v) pq
+
+-- FIXME backward propagation for efficiency?
+simplex :: Rex a -> Rex a
+simplex (Alt r Nill) = simplex r
+simplex (Alt Nill r) = simplex r
+simplex (Alt r1 r2) = Alt (simplex r1) (simplex r2)
+simplex (Cat _ Nill) = Nill
+simplex (Cat Nill _) = Nill
+simplex (Cat r (Prim Nothing)) = simplex r
+simplex (Cat (Prim Nothing) r) = simplex r
+simplex (Cat r1 r2) = Cat (simplex r1) (simplex r2)
+simplex (Clos Nill) = Prim Nothing
+simplex (Clos r) = Clos (simplex r)
+simplex r = r
+
+simplix :: Eq a => Rex a -> Rex a
+simplix = fst . fromJust . find (uncurry (==)) . ap zip tail . iterate simplex
+
+gtg2rex :: (Ord s, Eq a) => GTG s a -> Rex a
+gtg2rex = simplix . gtg2rex'
+
+-- Figuire 3.13
+sample_dfa8 :: DFA String Int
+sample_dfa8 = dfa sigma "EE" ["EO"] ["EE", "OE", "OO", "EO"] [0,1]
+  where sigma "EE" 0 = "OE"
+        sigma "EE" 1 = "EO"
+        sigma "OE" 0 = "EE"
+        sigma "OE" 1 = "OO"
+        sigma "OO" 0 = "EO"
+        sigma "OO" 1 = "OE"
+        sigma "EO" 0 = "OO"
+        sigma "EO" 1 = "EE"
+
+-- ex 3.2-10.a
+sample_nfa5 :: NFA State Int
+sample_nfa5 = nfa sigma (Q 0) [Q 3] [Q 0 .. Q 3] [0,1]
+  where sigma (Q 0) (Just 0) = [Q 1]
+        sigma (Q 0) (Just 1) = [Q 0]
+        sigma (Q 1) (Just 0) = [Q 1, Q 2]
+        sigma (Q 2) (Just 0) = [Q 3]
+        sigma (Q 2) (Just 1) = [Q 2]
+        sigma _ _ = []
+
+-- ex 3.2-10.b
+sample_nfa6 :: NFA State Int
+sample_nfa6 = nfa sigma (Q 0) [Q 0] [Q 0 .. Q 2] [0,1]
+  where sigma (Q 0) (Just 0) = [Q 1]
+        sigma (Q 0) (Just 1) = [Q 2]
+        sigma (Q 1) (Just 0) = [Q 2]
+        sigma (Q 1) (Just 1) = [Q 0]
+        sigma (Q 2) (Just 1) = [Q 1]
+        sigma _ _ = []
+
+-- ex 3.2-10.c
+sample_nfa7 :: NFA State Int
+sample_nfa7 = nfa sigma (Q 0) [Q 1, Q 2] [Q 0 .. Q 2] [0,1]
+  where sigma (Q 0) (Just 0) = [Q 0]
+        sigma (Q 0) (Just 1) = [Q 1, Q 2]
+        sigma (Q 1) (Just 0) = [Q 2]
+        sigma (Q 2) (Just 0) = [Q 1]
+        sigma _ _ = []
