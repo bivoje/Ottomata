@@ -402,11 +402,6 @@ type Inc n = ST.State n
 next :: Enum n => Inc n n
 next = ST.get >>= \n -> ST.modify succ >> return n
 
-following :: Enum n => Int -> Inc n [n]
-following m = ST.get >>= \n ->
-  let ls = take m $ iterate succ n
-  in ST.put (succ $ last ls) >> return ls
-
 runInc :: Inc n a -> n -> (a, n)
 runInc = ST.runState
 
@@ -495,7 +490,7 @@ rex2alphas _ = S.empty
 rex2nfa' :: (Enum s, Ord s, Ord a) => Rex a -> Inc s (NFA' s a)
 rex2nfa' Nill = NFA' mempty <$> next <*> next
 rex2nfa' (Prim ma) = do
-  [init, fin] <- following 2
+  (init, fin) <- (,) <$> next <*> next
   return $ NFA' (mempty & wire init ma fin) init fin
 rex2nfa' (Alt nl nr) = do
   init <- next
@@ -543,7 +538,7 @@ rex2nfa'' (Cat nl nr) i f = do
   sigr <- rex2nfa'' nr mid f
   return $  sigl <> sigr
 rex2nfa'' (Clos na) i f = do
-  [init, fin] <- following 2
+  (init, fin) <- (,) <$> next <*> next
   sig <- rex2nfa'' na init fin
   return $ sig
            & wire init Nothing fin
