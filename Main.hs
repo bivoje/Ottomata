@@ -230,10 +230,13 @@ bfs' f = bfs'' f S.empty
 
 
 -- it does not remove unreachable states => verbose representation.
-nfa2dfa :: (Ord s, Ord a) => NFA s a -> DFA (Set s) a
+nfa2dfa :: forall s a. (Ord s, Ord a) => NFA s a -> DFA (Set s) a
 nfa2dfa (NFA f initial final states alphas) = DFA f' initial' final' states' alphas
-  where f' ss a = S.unions . map (\s -> extend_lambda . f s . Just $ a) $ S.toList ss
-          where extend_lambda = bfs' (\s -> f s Nothing)
+  where f' :: Set s -> a -> Set s
+        f' ss a = foldMap (\s -> extend_lambda . f s . Just $ a) . extend_lambda $ ss
+        -- foldmap uses mconcat to fold. monoid (semigroup) operation of Set is Union
+          where extend_lambda :: Set s -> Set s
+                extend_lambda = bfs' (\s -> f s Nothing)
         initial' = S.singleton initial
         final' ss = any final $ S.toList ss
         -- NOTE S.toList works as iterator for a set (due to lazyness)
