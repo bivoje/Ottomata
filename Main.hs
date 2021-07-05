@@ -1158,3 +1158,23 @@ sample_nfa7 = nfa sigma (Q 0) [Q 1, Q 2] [Q 0 .. Q 2] [0,1]
         sigma (Q 1) (Just 0) = [Q 2]
         sigma (Q 2) (Just 0) = [Q 1]
         sigma _ _ = []
+
+data Linear v a = Linear [a] (Maybe v) [a] deriving (Show, Read, Eq)
+newtype LinearL v a = LinearL (Linear v a) deriving (Show, Read, Eq)
+newtype LinearR v a = LinearR (Linear v a) deriving (Show, Read, Eq)
+data Regular v a = RegularL (LinearL v a) | RegularR (LinearR v a)
+  deriving (Show, Read, Eq)
+
+getLinearL :: Linear v a -> Maybe (LinearL v a)
+getLinearL p@(Linear [] _ _) = Just $ LinearL p
+getLinearL _ = Nothing
+
+getLinearR :: Linear v a -> Maybe (LinearR v a)
+getLinearR p@(Linear _ _ []) = Just $ LinearR p
+getLinearR _ = Nothing
+
+getRegular :: Linear v a -> Maybe (Regular v a)
+getRegular p = RegularL <$> getLinearL p <|> RegularR <$> getLinearR p
+
+
+--data LinearG v a = LiearG (v -> l v a) v (Set v) [a]
