@@ -4,6 +4,8 @@
 {-# OPTIONS -Wno-unused-top-binds #-}
 -- {-# LANGUAGE FlexibleContexts #-}
 
+module Ottomata where
+
 {-|
   Toy project to implement automata related proofs in haskell.
   Workflow is based on the book [An Introduction to Formal
